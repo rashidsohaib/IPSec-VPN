@@ -1,0 +1,615 @@
+"""Native desktop client: main window + system-tray icon (StatusNotifier / XEmbed via Qt)."""
+import os
+import shutil
+import sys
+import threading
+
+from PyQt5 import QtCore, QtGui, QtNetwork, QtWidgets
+from PyQt5.QtCore import Qt
+
+from . import __version__, core, forti, sysetup
+
+APP_NAME = "IPSec VPN - Design By Rashid"
+WINDOW_TITLE = "IPSec VPN - Design By Rashid"
+COLORS = {"off": "#7a828c", "busy": "#e0a100", "on": "#1f9d63"}
+STATE_TEXT = {"off": "Disconnected", "busy": "Working…", "on": "Connected"}
+
+
+def make_pixmap(state, size=64):
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.scale(size / 64.0, size / 64.0)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QtGui.QColor(COLORS[state]))
+    p.drawEllipse(2, 2, 60, 60)
+    shield = QtGui.QPainterPath()
+    shield.moveTo(32, 11)
+    shield.lineTo(49, 17)
+    shield.lineTo(49, 31)
+    shield.cubicTo(49, 43, 41, 50, 32, 54)
+    shield.cubicTo(23, 50, 15, 43, 15, 31)
+    shield.lineTo(15, 17)
+    shield.closeSubpath()
+    p.setBrush(QtGui.QColor("white"))
+    p.drawPath(shield)
+    pen = QtGui.QPen(QtGui.QColor(COLORS[state]), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    if state == "on":
+        p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(24, 32), QtCore.QPointF(30, 38), QtCore.QPointF(41, 25)]))
+    elif state == "off":
+        p.drawLine(24, 32, 40, 32)
+    else:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QtGui.QColor(COLORS["busy"]))
+        for x in (23, 32, 41):
+            p.drawEllipse(QtCore.QPointF(x, 32), 3, 3)
+    p.end()
+    return pm
+
+
+def icons():
+    return {s: QtGui.QIcon(make_pixmap(s)) for s in COLORS}
+
+
+FONT_BUMP_PX = 2
+
+
+def bump_font(app, px):
+    """Make the whole UI `px` pixels larger than the system default (DPI-aware)."""
+    f = app.font()
+    if f.pixelSize() > 0:
+        f.setPixelSize(f.pixelSize() + px)
+    else:
+        scr = app.primaryScreen()
+        dpi = (scr.logicalDotsPerInch() if scr else 96) or 96
+        f.setPointSizeF(f.pointSizeF() + px * 72.0 / dpi)
+    app.setFont(f)
+
+
+def appimage_path():
+    return os.environ.get("APPIMAGE") or ""
+
+
+class MainWindow(QtWidgets.QWidget):
+    job_done = QtCore.pyqtSignal(str, object)
+    problems_ready = QtCore.pyqtSignal(object)
+
+    def __init__(self, start_hidden=False):
+        super().__init__()
+        self.setWindowTitle(WINDOW_TITLE)
+        self.icons = icons()
+        self.setWindowIcon(self.icons["off"])
+        self.setMinimumWidth(520)
+        self.resize(560, 760)
+        self.setAcceptDrops(True)
+        self.profile = core.load_profile()
+        self.state = "off"
+        self.busy = False
+        self.expect_drop = False
+        self.was_connected = False
+        self.problems = []
+        self.quitting = False
+        self._build_ui()
+        self._build_tray()
+        self.job_done.connect(self._on_job_done)
+        self.problems_ready.connect(self._on_problems)
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(2000)
+        self._load_settings()
+        self._render_profile()
+        self.recheck_system()
+        self.refresh()
+        if not start_hidden or not self.tray_ok:
+            self.show_window()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setSpacing(10)
+        inner = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(inner)      # scrollable body: nothing clips on small screens
+        root.setContentsMargins(0, 0, 6, 0)
+        root.setSpacing(10)
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(inner)
+        self.body = inner
+
+        head = QtWidgets.QHBoxLayout()
+        self.dot = QtWidgets.QLabel()
+        self.dot.setFixedSize(28, 28)
+        self.status_lbl = QtWidgets.QLabel()
+        f = self.status_lbl.font()
+        f.setPointSize(f.pointSize() + 4)
+        f.setBold(True)
+        self.status_lbl.setFont(f)
+        self.sub_lbl = QtWidgets.QLabel()
+        self.sub_lbl.setStyleSheet("color: gray")
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(self.status_lbl)
+        col.addWidget(self.sub_lbl)
+        head.addWidget(self.dot)
+        head.addLayout(col, 1)
+        outer.addLayout(head)
+
+        self.setup_box = QtWidgets.QGroupBox("System setup needed")
+        sb = QtWidgets.QVBoxLayout(self.setup_box)
+        self.setup_lbl = QtWidgets.QLabel()
+        self.setup_lbl.setWordWrap(True)
+        self.setup_btn = QtWidgets.QPushButton("Set up system components…")
+        self.setup_btn.clicked.connect(self.run_setup)
+        sb.addWidget(self.setup_lbl)
+        sb.addWidget(self.setup_btn)
+        root.addWidget(self.setup_box)
+
+        cfg = QtWidgets.QGroupBox("Configuration")
+        cl = QtWidgets.QVBoxLayout(cfg)
+        self.prof_lbl = QtWidgets.QLabel()
+        self.prof_lbl.setWordWrap(True)
+        self.prof_lbl.setTextFormat(Qt.RichText)
+        self.warn_lbl = QtWidgets.QLabel()
+        self.warn_lbl.setWordWrap(True)
+        self.warn_lbl.setStyleSheet("color: #b07400")
+        self.imp_btn = QtWidgets.QPushButton("Import FortiClient config…")
+        self.imp_btn.clicked.connect(self.pick_config)
+        cl.addWidget(self.prof_lbl)
+        cl.addWidget(self.warn_lbl)
+        cl.addWidget(self.imp_btn)
+        root.addWidget(cfg)
+
+        self.form_box = QtWidgets.QGroupBox("Sign in")
+        fl = QtWidgets.QFormLayout(self.form_box)
+        self.user = QtWidgets.QLineEdit()
+        self.pw = QtWidgets.QLineEdit()
+        self.pw.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.psk = QtWidgets.QLineEdit()
+        self.psk.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.mode = QtWidgets.QComboBox()
+        for k, v in forti.AUTH_MODES.items():
+            self.mode.addItem(v, k)
+        self.route = QtWidgets.QComboBox()
+        self.route.addItem("Everything", "all")
+        self.route.addItem("Only these networks", "custom")
+        self.routes = QtWidgets.QLineEdit()
+        self.routes.setPlaceholderText("10.0.0.0/8, 192.168.50.0/24")
+        self.route.currentIndexChanged.connect(lambda: self.routes.setEnabled(self.route.currentData() == "custom"))
+        self.remember = QtWidgets.QCheckBox("Remember password and key on this computer")
+        fl.addRow("Username", self.user)
+        fl.addRow("Password", self.pw)
+        fl.addRow("Pre-shared key", self.psk)
+        fl.addRow("Authentication", self.mode)
+        fl.addRow("Route", self.route)
+        fl.addRow("Networks", self.routes)
+        fl.addRow(self.remember)
+        root.addWidget(self.form_box)
+
+        self.err = QtWidgets.QLabel()
+        self.err.setWordWrap(True)
+        self.err.setStyleSheet("color: #d14343")
+        self.err.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        root.addWidget(self.err)
+        root.addStretch(1)
+        outer.addWidget(self.scroll, 1)
+
+        self.go = QtWidgets.QPushButton("Connect")
+        self.go.setMinimumHeight(38)
+        self.go.setDefault(True)
+        self.go.clicked.connect(self.toggle_connection)
+        outer.addWidget(self.go)
+
+        opts = QtWidgets.QHBoxLayout()
+        self.autostart = QtWidgets.QCheckBox("Start at login (in tray)")
+        self.autostart.toggled.connect(self.set_autostart)
+        self.menu_btn = QtWidgets.QPushButton("Add to app menu")
+        self.menu_btn.clicked.connect(self.add_to_menu)
+        opts.addWidget(self.autostart, 1)
+        opts.addWidget(self.menu_btn)
+        outer.addLayout(opts)
+
+        self.log_btn = QtWidgets.QPushButton("Show technical log")
+        self.log_btn.setFlat(True)
+        self.log_btn.setCheckable(True)
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(500)
+        self.log.setMinimumHeight(90)
+        self.log.hide()
+        self.log_btn.toggled.connect(lambda on: (self.log.setVisible(on),
+                                                 self.log_btn.setText("Hide technical log" if on else "Show technical log")))
+        outer.addWidget(self.log_btn)
+        outer.addWidget(self.log)
+        self.autostart.setEnabled(bool(appimage_path()))
+        self.menu_btn.setEnabled(bool(appimage_path()))
+        self.autostart.setChecked(os.path.exists(self._autostart_file()))
+        self._migrate_legacy_desktop_files()
+
+    def _build_tray(self):
+        self.tray_ok = QtWidgets.QSystemTrayIcon.isSystemTrayAvailable()
+        self.tray = QtWidgets.QSystemTrayIcon(self.icons["off"], self)
+        m = QtWidgets.QMenu()
+        self.act_status = m.addAction("Disconnected")
+        self.act_status.setEnabled(False)
+        m.addSeparator()
+        self.act_show = m.addAction("Show window")
+        self.act_show.triggered.connect(self.toggle_window)
+        self.act_conn = m.addAction("Connect")
+        self.act_conn.triggered.connect(self.toggle_connection_from_tray)
+        m.addSeparator()
+        m.addAction("Quit").triggered.connect(self.quit_app)
+        self.tray_menu = m
+        self.tray.setContextMenu(m)
+        self.tray.setToolTip(APP_NAME)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    # ---------- window <-> tray ----------
+    def show_window(self):
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def toggle_window(self):
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show_window()
+
+    def _tray_activated(self, reason):
+        if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
+            self.toggle_window()
+
+    def closeEvent(self, e):
+        if self.quitting or not (self.tray_ok and self.tray.isVisible()):
+            e.accept()
+            QtWidgets.QApplication.quit()
+            return
+        e.ignore()
+        self.hide()
+        if not getattr(self, "_told", False):
+            self._told = True
+            self.notify("Still running", "IPSec VPN - Design By Rashid is in the system tray. Click the icon to open it.")
+
+    def changeEvent(self, e):
+        if e.type() == QtCore.QEvent.WindowStateChange and self.isMinimized() and self.tray_ok and self.tray.isVisible():
+            QtCore.QTimer.singleShot(0, self.hide)
+        super().changeEvent(e)
+
+    def quit_app(self):
+        if self.state == "on":
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Quit IPSec VPN - Design By Rashid")
+            box.setText("The VPN is connected. Disconnect before quitting?")
+            d = box.addButton("Disconnect and quit", QtWidgets.QMessageBox.AcceptRole)
+            k = box.addButton("Quit, stay connected", QtWidgets.QMessageBox.DestructiveRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.exec_()
+            if box.clickedButton() is d:
+                self.expect_drop = True
+                core.disconnect(self.profile)
+            elif box.clickedButton() is not k:
+                return
+        self.quitting = True
+        self.tray.hide()
+        QtWidgets.QApplication.quit()
+
+    def notify(self, title, msg, warn=False):
+        if self.tray_ok:
+            self.tray.showMessage(title, msg, QtWidgets.QSystemTrayIcon.Warning if warn
+                                  else QtWidgets.QSystemTrayIcon.Information, 5000)
+
+    # drag & drop a .conf onto the window
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        for u in e.mimeData().urls():
+            if u.isLocalFile():
+                self.import_config(u.toLocalFile())
+                break
+
+    # ---------- settings / profile ----------
+    def _load_settings(self):
+        s = core.load_settings()
+        self.user.setText(s.get("username") or "")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(s.get("auth_mode") or "eap")))
+        self.routes.setText(s.get("routes") or "")
+        self.route.setCurrentIndex(1 if s.get("routes") else 0)
+        self.routes.setEnabled(bool(s.get("routes")))
+        self.remember.setChecked(bool(s.get("remember")))
+        self._update_saved_placeholders()
+
+    def _update_saved_placeholders(self):
+        saved = bool(core.load_secrets())
+        self.pw.setPlaceholderText("Saved" if saved else "")
+        self.psk.setPlaceholderText("Saved" if saved else "")
+
+    def _render_profile(self):
+        p = self.profile
+        if not p:
+            self.prof_lbl.setText("No configuration yet. Import your <b>FortiClient .conf export</b> "
+                                  "(or drop it on this window).")
+            self.warn_lbl.setText("")
+            self.imp_btn.setText("Import FortiClient config…")
+        else:
+            self.prof_lbl.setText(
+                f"<b>{p['name']}</b><br>Server: {p['server']}<br>IKEv2 · {p['ike_proposals'][0]} (+{len(p['ike_proposals']) - 1})"
+                f"<br>Lifetimes: IKE {p['ike_lifetime'] // 3600} h · ESP {p['esp_lifetime'] // 3600} h")
+            self.warn_lbl.setText("\n".join(p.get("warnings") or []))
+            self.imp_btn.setText("Import a different config…")
+        self.form_box.setEnabled(bool(p))
+        self.go.setEnabled(bool(p) and not self.busy and not self.problems)
+
+    def pick_config(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose FortiClient config", os.path.expanduser("~"),
+            "FortiClient config (*.conf *.xml);;All files (*)")
+        if path:
+            self.import_config(path)
+
+    def import_config(self, path):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                profiles = forti.parse_forticlient(f.read())
+        except (OSError, forti.ConfigError, UnicodeDecodeError) as e:
+            self.err.setText(f"Could not import: {e}")
+            return
+        self.err.setText("")
+        self.profile = profiles[0]
+        core.save_profile(self.profile)
+        self._render_profile()
+
+    # ---------- system setup ----------
+    def recheck_system(self):
+        threading.Thread(target=lambda: self.problems_ready.emit(sysetup.check()), daemon=True).start()
+
+    def _on_problems(self, problems):
+        self.problems = problems
+        self.setup_box.setVisible(bool(problems))
+        if problems:
+            self.setup_lbl.setText("Before the first connection this computer needs: " + "; ".join(problems)
+                                   + ".\nThis installs strongSwan and a small helper, and asks for your "
+                                     "administrator password once.")
+        self._render_profile()
+        self._update_actions()
+
+    def run_setup(self):
+        app = appimage_path()
+        cmd = [app] if app else [sys.executable, "-m", "ipsec_vpn.app"]
+        if app and ".mount_" not in os.environ.get("APPDIR", ""):
+            # launched without FUSE (extract-and-run): root must do the same
+            cmd = ["env", "APPIMAGE_EXTRACT_AND_RUN=1"] + cmd
+        self.setup_btn.setEnabled(False)
+        self.log.appendPlainText("Starting system setup…")  # log stays collapsed unless the user opens it
+        proc = QtCore.QProcess(self)
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda: self.log.appendPlainText(bytes(proc.readAllStandardOutput()).decode(errors="replace").rstrip()))
+
+        def finished(code, _status):
+            self.setup_btn.setEnabled(True)
+            if code == 0:
+                self.log.appendPlainText("Setup finished.")
+                self.err.setText("")
+            else:
+                manual = f"sudo '{app or 'ipsec-vpn'}' --system-setup"
+                self.err.setText("Setup did not complete (administrator permission was denied or unavailable).\n"
+                                 f"You can run it in a terminal instead:\n{manual}")
+            self.recheck_system()
+        proc.finished.connect(finished)
+        proc.start("pkexec", cmd + ["--system-setup"])
+        self._setup_proc = proc
+
+    # ---------- connection ----------
+    def refresh(self):
+        st = core.status()
+        on = bool(st.get("connected"))
+        if self.was_connected and not on and not self.expect_drop and not self.busy:
+            self.notify("VPN connection lost", st.get("note") or "The tunnel to the gateway went down.", warn=True)
+        if not on:
+            self.expect_drop = False
+        self.was_connected = on
+        self._st = st
+        self._apply_state("busy" if self.busy else "on" if on else "off", st)
+
+    def _apply_state(self, state, st=None):
+        st = st or getattr(self, "_st", {})
+        self.state = state
+        self.dot.setPixmap(make_pixmap(state, 28))
+        self.status_lbl.setText(STATE_TEXT[state])
+        if state == "on":
+            self.sub_lbl.setText(f"VPN address {st.get('vip') or 'unknown'} · server {st.get('server', '')}")
+        else:
+            self.sub_lbl.setText(st.get("note") or "")
+        self.tray.setIcon(self.icons[state])
+        self.setWindowIcon(self.icons[state])
+        self.tray.setToolTip(f"{APP_NAME} — {STATE_TEXT[state]}")
+        self.act_status.setText(STATE_TEXT[state] + (f" ({st.get('vip')})" if state == "on" and st.get("vip") else ""))
+        self._update_actions()
+
+    def _update_actions(self):
+        on = self.state == "on"
+        ready = bool(self.profile) and not self.problems and not self.busy
+        self.go.setText("Disconnect" if on else "Connect")
+        self.go.setEnabled(ready or (on and not self.busy))
+        self.form_box.setEnabled(bool(self.profile) and not on and not self.busy)
+        self.act_conn.setText("Disconnect" if on else "Connect")
+        self.act_conn.setEnabled(ready or (on and not self.busy))
+
+    def _inputs(self):
+        s = core.load_settings()
+        sec = core.load_secrets()
+        user = self.user.text().strip()
+        pw = self.pw.text() or sec.get("password", "")
+        psk = self.psk.text() or sec.get("psk", "")
+        mode = self.mode.currentData()
+        routes = self.routes.text().strip() if self.route.currentData() == "custom" else ""
+        return user, pw, psk, mode, routes, s
+
+    def toggle_connection(self):
+        if self.state == "on":
+            return self.disconnect()
+        user, pw, psk, mode, routes, _ = self._inputs()
+        if not pw or not psk:
+            self.err.setText("Enter the password and the pre-shared key.")
+            return
+        self.connect_with(user, pw, psk, mode, routes, remember=self.remember.isChecked())
+
+    def toggle_connection_from_tray(self):
+        if self.state == "on":
+            return self.disconnect()
+        user, pw, psk, mode, routes, s = self._inputs()
+        if user and pw and psk:
+            self.connect_with(user, pw, psk, mode, routes, remember=bool(s.get("remember")))
+        else:
+            self.show_window()
+            self.err.setText("Enter your credentials once (tick “Remember” to connect from the tray in one click).")
+
+    def connect_with(self, user, pw, psk, mode, routes, remember):
+        try:
+            prof = forti.with_routes(self.profile, routes)
+            forti.validate(prof, user, mode)
+        except forti.ConfigError as e:
+            self.err.setText(str(e))
+            return
+        core.save_settings({"username": user, "auth_mode": mode, "remember": remember, "routes": routes})
+        if remember:
+            core.save_secrets(pw, psk)
+        else:
+            core.clear_secrets()
+        self.pw.clear()
+        self.psk.clear()
+        self._update_saved_placeholders()
+        self.err.setText("")
+        self._run_job("connect", lambda: core.connect(prof, user, pw, psk, mode))
+
+    def disconnect(self):
+        self.expect_drop = True
+        self._run_job("disconnect", lambda: core.disconnect(self.profile))
+
+    def _run_job(self, kind, fn):
+        if self.busy:
+            return
+        self.busy = True
+        self._apply_state("busy")
+
+        def work():
+            try:
+                r = fn()
+            except Exception as e:  # keep the UI alive whatever happens
+                r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            self.job_done.emit(kind, r)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_job_done(self, kind, r):
+        self.busy = False
+        if r.get("log"):
+            self.log.appendPlainText(r["log"])
+        if r.get("ok"):
+            if kind == "connect":
+                vip = (r.get("state") or {}).get("vip")
+                self.notify("VPN connected", f"VPN address {vip}" if vip else "Tunnel established.")
+            else:
+                self.notify("VPN disconnected", "The tunnel is closed.")
+        else:
+            msg = r.get("error", "Failed")
+            self.err.setText(msg)
+            self.log.appendPlainText(msg)
+            self.notify("VPN " + kind + " failed", msg.splitlines()[0], warn=True)
+            if kind == "disconnect":
+                self.expect_drop = False
+        self.refresh()
+
+    # ---------- desktop integration ----------
+    @staticmethod
+    def _autostart_file():
+        return os.path.expanduser("~/.config/autostart/ipsec-vpn.desktop")
+
+    def _migrate_legacy_desktop_files(self):
+        """Replace launcher entries written by earlier versions (old name) with current ones."""
+        home = os.path.expanduser("~")
+        old_auto = os.path.join(home, ".config/autostart/diadem-vpn.desktop")
+        old_menu = os.path.join(home, ".local/share/applications/diadem-vpn.desktop")
+        old_icon = os.path.join(home, ".local/share/icons/hicolor/256x256/apps/diadem-vpn.png")
+        if os.path.exists(old_auto):
+            os.remove(old_auto)
+            if appimage_path():
+                self.autostart.setChecked(True)
+        for p in (old_menu, old_icon):
+            if os.path.exists(p):
+                os.remove(p)
+                if p is old_menu and appimage_path():
+                    self.add_to_menu(announce=False)
+
+    def set_autostart(self, on):
+        path = self._autostart_file()
+        if on and appimage_path():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nExec=\"{appimage_path()}\" --minimized\n"
+                        "Icon=ipsec-vpn\nX-GNOME-Autostart-enabled=true\n")
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def add_to_menu(self, announce=True):
+        app = appimage_path()
+        if not app:
+            return
+        icon_dir = os.path.expanduser("~/.local/share/icons/hicolor/256x256/apps")
+        os.makedirs(icon_dir, exist_ok=True)
+        make_pixmap("on", 256).save(os.path.join(icon_dir, "ipsec-vpn.png"))
+        apps = os.path.expanduser("~/.local/share/applications")
+        os.makedirs(apps, exist_ok=True)
+        with open(os.path.join(apps, "ipsec-vpn.desktop"), "w") as f:
+            f.write(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nComment=IPsec VPN client\n"
+                    f"Exec=\"{app}\"\nIcon=ipsec-vpn\nCategories=Network;\nTerminal=false\n")
+        if announce:
+            self.notify("Added to menu", "IPSec VPN - Design By Rashid now appears in your application menu.")
+
+
+def _single_instance(name):
+    """Return (server, None) if we are the first instance, else (None, True) after asking the first to show."""
+    sock = QtNetwork.QLocalSocket()
+    sock.connectToServer(name)
+    if sock.waitForConnected(300):
+        sock.write(b"show")
+        sock.waitForBytesWritten(500)
+        sock.disconnectFromServer()
+        return None, True
+    QtNetwork.QLocalServer.removeServer(name)
+    srv = QtNetwork.QLocalServer()
+    srv.listen(name)
+    return srv, False
+
+
+def main(argv):
+    hidden = "--minimized" in argv
+    smoke = argv[argv.index("--smoke") + 1] if "--smoke" in argv else None
+    app = QtWidgets.QApplication([APP_NAME] + [a for a in argv if a not in ("--minimized",)])
+    app.setApplicationName("ipsec-vpn")
+    app.setApplicationDisplayName(APP_NAME)
+    app.setDesktopFileName("ipsec-vpn")
+    app.setQuitOnLastWindowClosed(False)
+    app.setStyle("Fusion")
+    bump_font(app, FONT_BUMP_PX)
+    srv, already = _single_instance(f"ipsec-vpn-{os.getuid()}")
+    if already and not smoke:
+        return 0
+    win = MainWindow(start_hidden=hidden)
+    if srv:
+        srv.newConnection.connect(lambda: (srv.nextPendingConnection(), win.show_window()))
+    if smoke:
+        def snap():
+            win.grab().save(smoke)
+            print("SMOKE OK tray_available=%s version=%s" % (win.tray_ok, __version__))
+            app.quit()
+        QtCore.QTimer.singleShot(1500, snap)
+    return app.exec_()
