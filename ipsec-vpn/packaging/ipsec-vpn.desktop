@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=IPSec VPN - Design By Rashid
-Comment=Connect to an IPsec VPN
-Exec=/usr/local/bin/ipsec-vpn ui
-Icon=network-vpn
-Terminal=false
-Categories=Network;
