@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.5.1
+- **Add manually…** also asks for the user name, password and pre-shared key (they fill the Sign in form).
+
 ## 1.5.0
 - **Add manually…**: create a connection by hand (name, gateway, networks, encryption, integrity, DH group) instead of
   importing a FortiClient export; **Edit connection…** reopens it.

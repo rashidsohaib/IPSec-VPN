@@ -34,7 +34,10 @@ assert w.profile and w.profile["server"] == "vpn.example.com"
 # manual profile dialog: validation error, then a saved connection that becomes the active profile
 d = qt_app.ProfileDialog(w); d.show(); spin(100)
 d.ok.click(); assert d.err.text() and d.result_profile is None, "empty form must be refused"
-d.name.setText("Office VPN"); d.server.setText("vpn.example.com"); d.nets.setText("10.0.0.0/8"); d.ok.click()
+d.name.setText("Office VPN"); d.server.setText("vpn.example.com"); d.nets.setText("10.0.0.0/8")
+d.user.setText("bad user;"); d.ok.click(); assert d.err.text() and d.result_profile is None, "bad user name must be refused"
+d.user.setText("jdoe"); d.pw.setText("example-password"); d.psk.setText("example-psk"); d.ok.click()
+assert d.credentials() == ("jdoe", "example-password", "example-psk")
 assert d.result_profile and d.result_profile["remote_ts"] == ["10.0.0.0/8"] and d.result_profile["manual"]["dh"] == "ecp521"
 w.profile = d.result_profile; core.save_profile(w.profile); w._render_profile()
 assert w.add_btn.text() == "Edit connection…" and "Office VPN" in w.prof_lbl.text()

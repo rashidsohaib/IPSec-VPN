@@ -114,7 +114,7 @@ def _field_label(text):
 class ProfileDialog(QtWidgets.QDialog):
     """Add (or edit) a connection by hand instead of importing a FortiClient export."""
 
-    def __init__(self, parent=None, profile=None):
+    def __init__(self, parent=None, profile=None, username=""):
         super().__init__(parent)
         self.setWindowTitle("Add connection")
         self.setMinimumWidth(480)
@@ -127,8 +127,9 @@ class ProfileDialog(QtWidgets.QDialog):
         f.setBold(True)
         title.setFont(f)
         lay.addWidget(title)
-        hint = QtWidgets.QLabel("The defaults match a typical FortiGate IPsec tunnel for FortiClient (IKEv2, "
-                                "group 21). Change them only if your administrator says so.")
+        hint = QtWidgets.QLabel("Enter the gateway and your sign-in details. The encryption defaults match a typical "
+                                "FortiGate IPsec tunnel for FortiClient (IKEv2, group 21); change them only if your "
+                                "administrator says so.")
         hint.setObjectName("fieldlabel")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -143,10 +144,18 @@ class ProfileDialog(QtWidgets.QDialog):
         self.server.setPlaceholderText("vpn.example.com or 203.0.113.10")
         self.nets = QtWidgets.QLineEdit()
         self.nets.setPlaceholderText("Empty = everything; or 10.0.0.0/8, 192.168.50.0/24")
+        self.user = QtWidgets.QLineEdit()
+        self.user.setPlaceholderText("Your VPN user name")
+        self.user.setText(username)
+        self.pw = QtWidgets.QLineEdit()
+        self.pw.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.psk = QtWidgets.QLineEdit()
+        self.psk.setEchoMode(QtWidgets.QLineEdit.Password)
         self.enc = self._combo(forti.MANUAL_ENC)
         self.hash = self._combo(forti.MANUAL_HASH)
         self.dh = self._combo(forti.MANUAL_DH)
-        for label, w in (("Name", self.name), ("Gateway", self.server), ("Networks", self.nets),
+        for label, w in (("Name", self.name), ("Gateway", self.server), ("User name", self.user),
+                         ("Password", self.pw), ("Pre-shared key", self.psk), ("Networks", self.nets),
                          ("Encryption", self.enc), ("Integrity", self.hash), ("DH group", self.dh)):
             form.addRow(_field_label(label), w)
         self.err = Banner("err")
@@ -187,10 +196,16 @@ class ProfileDialog(QtWidgets.QDialog):
             self.result_profile = forti.manual_profile(
                 self.name.text(), self.server.text(), self.enc.currentData(), self.hash.currentData(),
                 self.dh.currentData(), self.nets.text())
+            if self.user.text().strip():
+                forti.validate(self.result_profile, self.user.text().strip(), "eap")
         except forti.ConfigError as e:
             self.err.setText(str(e))
+            self.result_profile = None
             return
         self.accept()
+
+    def credentials(self):
+        return self.user.text().strip(), self.pw.text(), self.psk.text()
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -511,11 +526,19 @@ class MainWindow(QtWidgets.QWidget):
             self.import_config(path)
 
     def add_manually(self):
-        dlg = ProfileDialog(self, self.profile if (self.profile or {}).get("manual") else None)
+        dlg = ProfileDialog(self, self.profile if (self.profile or {}).get("manual") else None,
+                            username=self.user.text().strip())
         if dlg.exec_() == QtWidgets.QDialog.Accepted and dlg.result_profile:
             self.err.setText("")
             self.profile = dlg.result_profile
             core.save_profile(self.profile)
+            user, pw, psk = dlg.credentials()      # fill the Sign in form; "Remember" decides what is kept
+            if user:
+                self.user.setText(user)
+            if pw:
+                self.pw.setText(pw)
+            if psk:
+                self.psk.setText(psk)
             self._render_profile()
 
     def import_config(self, path):

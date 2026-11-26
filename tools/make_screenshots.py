@@ -74,6 +74,7 @@ shot(w, "05-error.png"); w.deleteLater()
 # 4b. add a connection by hand
 w = window([], profile=False)
 d = qt_app.ProfileDialog(w); d.name.setText("Office VPN"); d.server.setText("vpn.example.com"); d.nets.setText("10.0.0.0/8")
+d.user.setText("jdoe"); d.pw.setText("example-password"); d.psk.setText("example-psk")
 d.show(); wait(500); d.resize(d.width(), d.sizeHint().height()); wait(300)
 d.grab().save(os.path.join(OUT, "07-add-connection" + SUFFIX + ".png")); print("saved 07-add-connection.png")
 d.close(); w.deleteLater()

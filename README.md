@@ -15,7 +15,8 @@ no hand-written strongSwan configuration. It lives in the system tray, shows not
 ## Features
 
 - **Import or add by hand**: import a FortiClient `.conf` export, or press **Add manually…** and fill in the
-  gateway, networks and (optionally) encryption, integrity and Diffie-Hellman group.
+  gateway, your user name, password and pre-shared key, the networks, and (optionally) encryption, integrity and
+  Diffie-Hellman group.
 - **Uses your existing FortiClient config**: server, IKE/ESP proposals, Diffie-Hellman group, lifetimes,
   dead-peer detection and server-assigned address are read from the export and translated to strongSwan.
 - **System tray**: the icon is grey (disconnected), amber (working) or green (connected). Left-click shows or
@@ -55,7 +56,7 @@ no hand-written strongSwan configuration. It lives in the system tray, shows not
 2. **First run only**: press **Set up system components…**. After one administrator-password prompt it installs
    strongSwan and a small root-owned helper.
 3. Press **Import FortiClient config…** (or drop the `.conf` on the window). No export file? Press **Add manually…**
-   and enter the gateway address; the defaults suit a typical FortiGate tunnel.
+   and enter the gateway address, user name, password and pre-shared key; the defaults suit a typical FortiGate tunnel.
 4. Enter your username, password and the **pre-shared key**, then press **Connect**.
 
 > **Where do I get the config and the key?** Export the configuration from FortiClient on Windows
