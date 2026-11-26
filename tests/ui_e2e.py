@@ -9,7 +9,7 @@ sw = os.path.join(d, "swanctl"); open(sw, "w").write(FAKE); os.chmod(sw, 0o755)
 os.environ["FAKE_LOG"] = os.path.join(d, "log")
 os.environ["XDG_CONFIG_HOME"] = os.path.join(d, "cfg")
 vici = os.path.join(d, "vici"); open(vici, "w").close()
-kw = dict(swanctl=sw, conf_dir=os.path.join(d, "conf"), state_dir=os.path.join(d, "run"), vici=vici)
+kw = dict(swanctl=sw, conf_dir=os.path.join(d, "conf"), state_dir=os.path.join(d, "run"), vici=vici, ports_conf=os.path.join(d, "ports.conf"), restart=lambda: None)
 core.STATE_FILE = os.path.join(d, "run", "state.json")
 orig_status = core.status
 core.status = lambda **a: orig_status(state_file=core.STATE_FILE, local_ips={"10.212.134.7"})

@@ -121,6 +121,7 @@ def make_handler(state, port_getter):
             psk = b.get("psk") or sec.get("psk", "")
             mode = b.get("auth_mode", "eap")
             routes = (b.get("routes") or "").strip()
+            strict = bool(b.get("strict"))
             try:
                 p = forti.with_routes(p, routes)
                 forti.validate(p, user, mode)
@@ -128,12 +129,13 @@ def make_handler(state, port_getter):
                 return self._send(200, {"ok": False, "error": str(e)})
             if not pw or not psk:
                 return self._send(200, {"ok": False, "error": "Password and pre-shared key are required."})
-            core.save_settings({"username": user, "auth_mode": mode, "remember": bool(b.get("remember")), "routes": routes})
+            core.save_settings({"username": user, "auth_mode": mode, "remember": bool(b.get("remember")), "routes": routes,
+                                "random_ports": strict})
             if b.get("remember"):
                 core.save_secrets(pw, psk)
             else:
                 core.clear_secrets()
-            self._start_job("Connecting...", lambda: core.connect(p, user, pw, psk, mode))
+            self._start_job("Connecting...", lambda: core.connect(p, user, pw, psk, mode, random_ports=strict))
 
         def _disconnect(self):
             p = core.load_profile()

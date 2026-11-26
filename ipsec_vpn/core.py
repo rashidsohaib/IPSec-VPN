@@ -45,11 +45,11 @@ def save_profile(profile):
 
 
 def load_settings():
-    return _read("settings.json") or {"username": "", "auth_mode": "eap", "remember": False, "routes": ""}
+    return _read("settings.json") or {"username": "", "auth_mode": "eap", "remember": False, "routes": "", "random_ports": False, "local_id": ""}
 
 
 def save_settings(s):
-    _write("settings.json", {k: s.get(k) for k in ("username", "auth_mode", "remember", "routes")})
+    _write("settings.json", {k: s.get(k) for k in ("username", "auth_mode", "remember", "routes", "random_ports", "local_id")})
 
 
 def load_secrets():
@@ -105,10 +105,11 @@ def status(state_file=STATE_FILE, local_ips=None):
     return st
 
 
-def connect(profile, username, password, psk, auth_mode, **kw):
-    forti.validate(profile, username, auth_mode)
+def connect(profile, username, password, psk, auth_mode, random_ports=False, local_id="", **kw):
+    forti.validate(profile, username, auth_mode, local_id)
     return run_helper({"action": "connect", "profile": profile, "username": username,
-                       "password": password, "psk": psk, "auth_mode": auth_mode}, **kw)
+                       "password": password, "psk": psk, "auth_mode": auth_mode,
+                       "random_ports": bool(random_ports), "local_id": local_id or ""}, **kw)
 
 
 def disconnect(profile, **kw):

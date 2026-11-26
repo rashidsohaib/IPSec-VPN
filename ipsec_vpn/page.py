@@ -56,6 +56,7 @@ details{margin-top:10px;font-size:13px;color:var(--mute)}pre{white-space:pre-wra
   <label for="route">Traffic through the VPN</label>
   <select id="route"><option value="all">Everything (as in the Windows config)</option><option value="custom">Only these networks (split tunnel)</option></select>
   <div id="routebox" class="hide"><label for="routes">Networks, comma-separated</label><input type="text" id="routes" placeholder="10.0.0.0/8, 192.168.50.0/24"></div>
+  <label class="chk"><input type="checkbox" id="strict"> Strict firewall mode (random local ports)</label>
   <label class="chk"><input type="checkbox" id="remember"> Remember password and key on this computer</label>
   <button type="submit" id="go">Connect</button>
   <button type="button" class="sec hide" id="forget">Forget saved credentials</button>
@@ -96,6 +97,7 @@ async function refresh(){
     const m=$("mode");
     Object.entries(s.auth_modes).forEach(([k,v])=>{const o=document.createElement("option");o.value=k;o.textContent=v;m.append(o)});
     m.value=s.settings.auth_mode||"eap";
+    $("strict").checked=!!s.settings.random_ports;
     $("routes").value=s.settings.routes||"";$("route").value=s.settings.routes?"custom":"all";show($("routebox"),!!s.settings.routes);
   }
   $("pw").placeholder=$("psk").placeholder=s.has_secrets?"Saved":"";
@@ -125,7 +127,7 @@ $("file").onchange=e=>e.target.files[0]&&doImport(e.target.files[0]);
 $("drop").addEventListener("drop",e=>e.dataTransfer.files[0]&&doImport(e.dataTransfer.files[0]));
 $("offview").onsubmit=async e=>{
   e.preventDefault();
-  const r=await api("/api/connect",{username:$("user").value,password:$("pw").value,psk:$("psk").value,auth_mode:$("mode").value,routes:$("route").value==="custom"?$("routes").value:"",remember:$("remember").checked});
+  const r=await api("/api/connect",{username:$("user").value,password:$("pw").value,psk:$("psk").value,auth_mode:$("mode").value,routes:$("route").value==="custom"?$("routes").value:"",strict:$("strict").checked,remember:$("remember").checked});
   if(!r.ok){$("err").textContent=r.error;show($("err"),true)}else{$("pw").value="";$("psk").value=""}
   refresh();
 };

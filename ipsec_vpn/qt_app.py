@@ -1,4 +1,5 @@
 """Native desktop client: main window + system-tray icon (StatusNotifier / XEmbed via Qt)."""
+import html
 import os
 import shutil
 import sys
@@ -7,7 +8,7 @@ import threading
 from PyQt5 import QtCore, QtGui, QtNetwork, QtWidgets
 from PyQt5.QtCore import Qt
 
-from . import __version__, core, forti, sysetup
+from . import __version__, core, forti, sysetup, theme
 
 APP_NAME = "IPSec VPN - Design By Rashid"
 WINDOW_TITLE = "IPSec VPN - Design By Rashid"
@@ -73,6 +74,125 @@ def appimage_path():
     return os.environ.get("APPIMAGE") or ""
 
 
+class Banner(QtWidgets.QLabel):
+    """Message strip that is only visible while it has text."""
+
+    def __init__(self, kind):
+        super().__init__()
+        self.setObjectName(kind)
+        self.setWordWrap(True)
+        self.setVisible(False)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
+def _card(title):
+    """A flat white card with a small caps title; returns (frame, layout to add content to)."""
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("card")
+    lay = QtWidgets.QVBoxLayout(frame)
+    lay.setContentsMargins(16, 14, 16, 16)
+    lay.setSpacing(10)
+    t = QtWidgets.QLabel(title.upper())
+    t.setObjectName("cardtitle")
+    f = t.font()
+    f.setPointSizeF(max(6.0, f.pointSizeF() - 1.5))
+    t.setFont(f)
+    lay.addWidget(t)
+    return frame, lay
+
+
+def _field_label(text):
+    lbl = QtWidgets.QLabel(text)
+    lbl.setObjectName("fieldlabel")
+    return lbl
+
+
+
+class ProfileDialog(QtWidgets.QDialog):
+    """Add (or edit) a connection by hand instead of importing a FortiClient export."""
+
+    def __init__(self, parent=None, profile=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add connection")
+        self.setMinimumWidth(480)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(12)
+        title = QtWidgets.QLabel("Add connection manually")
+        f = title.font()
+        f.setPointSize(f.pointSize() + 3)
+        f.setBold(True)
+        title.setFont(f)
+        lay.addWidget(title)
+        hint = QtWidgets.QLabel("The defaults match a typical FortiGate IPsec tunnel for FortiClient (IKEv2, "
+                                "group 21). Change them only if your administrator says so.")
+        hint.setObjectName("fieldlabel")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        lay.addLayout(form)
+        self.name = QtWidgets.QLineEdit()
+        self.name.setPlaceholderText("Office VPN")
+        self.server = QtWidgets.QLineEdit()
+        self.server.setPlaceholderText("vpn.example.com or 203.0.113.10")
+        self.nets = QtWidgets.QLineEdit()
+        self.nets.setPlaceholderText("Empty = everything; or 10.0.0.0/8, 192.168.50.0/24")
+        self.enc = self._combo(forti.MANUAL_ENC)
+        self.hash = self._combo(forti.MANUAL_HASH)
+        self.dh = self._combo(forti.MANUAL_DH)
+        for label, w in (("Name", self.name), ("Gateway", self.server), ("Networks", self.nets),
+                         ("Encryption", self.enc), ("Integrity", self.hash), ("DH group", self.dh)):
+            form.addRow(_field_label(label), w)
+        self.err = Banner("err")
+        lay.addWidget(self.err)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        self.ok = QtWidgets.QPushButton("Save connection")
+        self.ok.setObjectName("primary")
+        self.ok.setDefault(True)
+        for b in (cancel, self.ok):
+            b.setCursor(Qt.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        self.ok.clicked.connect(self._save)
+        row.addWidget(cancel)
+        row.addWidget(self.ok)
+        lay.addLayout(row)
+        self.result_profile = None
+        m = (profile or {}).get("manual")
+        if m:
+            self.setWindowTitle("Edit connection")
+            self.name.setText(profile["name"])
+            self.server.setText(profile["server"])
+            ts = profile.get("remote_ts") or []
+            self.nets.setText("" if ts == ["0.0.0.0/0"] else ", ".join(ts))
+            for box, key in ((self.enc, "enc"), (self.hash, "hash"), (self.dh, "dh")):
+                box.setCurrentIndex(max(0, box.findData(m.get(key))))
+
+    @staticmethod
+    def _combo(options):
+        box = QtWidgets.QComboBox()
+        for k, v in options.items():
+            box.addItem(v, k)
+        return box
+
+    def _save(self):
+        try:
+            self.result_profile = forti.manual_profile(
+                self.name.text(), self.server.text(), self.enc.currentData(), self.hash.currentData(),
+                self.dh.currentData(), self.nets.text())
+        except forti.ConfigError as e:
+            self.err.setText(str(e))
+            return
+        self.accept()
+
+
 class MainWindow(QtWidgets.QWidget):
     job_done = QtCore.pyqtSignal(str, object)
     problems_ready = QtCore.pyqtSignal(object)
@@ -82,8 +202,8 @@ class MainWindow(QtWidgets.QWidget):
         self.setWindowTitle(WINDOW_TITLE)
         self.icons = icons()
         self.setWindowIcon(self.icons["off"])
-        self.setMinimumWidth(520)
-        self.resize(560, 760)
+        self.setMinimumWidth(540)
+        self.resize(580, 800)
         self.setAcceptDrops(True)
         self.profile = core.load_profile()
         self.state = "off"
@@ -108,12 +228,16 @@ class MainWindow(QtWidgets.QWidget):
 
     # ---------- UI ----------
     def _build_ui(self):
+        self.setObjectName("root")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setSpacing(10)
+        outer.setContentsMargins(18, 18, 18, 14)
+        outer.setSpacing(12)
         inner = QtWidgets.QWidget()
+        inner.setObjectName("body")
         root = QtWidgets.QVBoxLayout(inner)      # scrollable body: nothing clips on small screens
-        root.setContentsMargins(0, 0, 6, 0)
-        root.setSpacing(10)
+        root.setContentsMargins(1, 1, 9, 1)
+        root.setSpacing(12)
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -121,51 +245,68 @@ class MainWindow(QtWidgets.QWidget):
         self.scroll.setWidget(inner)
         self.body = inner
 
-        head = QtWidgets.QHBoxLayout()
+        # hero: big status tile that tints with the connection state
+        self.hero = QtWidgets.QFrame()
+        self.hero.setObjectName("hero")
+        self.hero.setProperty("state", "off")
+        head = QtWidgets.QHBoxLayout(self.hero)
+        head.setContentsMargins(16, 14, 16, 14)
+        head.setSpacing(14)
         self.dot = QtWidgets.QLabel()
-        self.dot.setFixedSize(28, 28)
+        self.dot.setFixedSize(48, 48)
         self.status_lbl = QtWidgets.QLabel()
+        self.status_lbl.setObjectName("status")
         f = self.status_lbl.font()
-        f.setPointSize(f.pointSize() + 4)
-        f.setBold(True)
+        f.setPointSize(f.pointSize() + 5)
         self.status_lbl.setFont(f)
         self.sub_lbl = QtWidgets.QLabel()
-        self.sub_lbl.setStyleSheet("color: gray")
+        self.sub_lbl.setObjectName("substatus")
+        self.sub_lbl.setWordWrap(True)
         col = QtWidgets.QVBoxLayout()
-        col.setSpacing(0)
+        col.setSpacing(1)
         col.addWidget(self.status_lbl)
         col.addWidget(self.sub_lbl)
         head.addWidget(self.dot)
         head.addLayout(col, 1)
-        outer.addLayout(head)
+        outer.addWidget(self.hero)
 
-        self.setup_box = QtWidgets.QGroupBox("System setup needed")
-        sb = QtWidgets.QVBoxLayout(self.setup_box)
+        self.setup_box, sb = _card("System setup")
         self.setup_lbl = QtWidgets.QLabel()
         self.setup_lbl.setWordWrap(True)
         self.setup_btn = QtWidgets.QPushButton("Set up system components…")
+        self.setup_btn.setCursor(Qt.PointingHandCursor)
         self.setup_btn.clicked.connect(self.run_setup)
         sb.addWidget(self.setup_lbl)
         sb.addWidget(self.setup_btn)
         root.addWidget(self.setup_box)
 
-        cfg = QtWidgets.QGroupBox("Configuration")
-        cl = QtWidgets.QVBoxLayout(cfg)
+        cfg, cl = _card("Configuration")
         self.prof_lbl = QtWidgets.QLabel()
+        self.prof_lbl.setObjectName("profile")
         self.prof_lbl.setWordWrap(True)
         self.prof_lbl.setTextFormat(Qt.RichText)
-        self.warn_lbl = QtWidgets.QLabel()
-        self.warn_lbl.setWordWrap(True)
-        self.warn_lbl.setStyleSheet("color: #b07400")
+        self.warn_lbl = Banner("warn")
         self.imp_btn = QtWidgets.QPushButton("Import FortiClient config…")
+        self.imp_btn.setCursor(Qt.PointingHandCursor)
         self.imp_btn.clicked.connect(self.pick_config)
+        self.add_btn = QtWidgets.QPushButton("Add manually…")
+        self.add_btn.setCursor(Qt.PointingHandCursor)
+        self.add_btn.clicked.connect(self.add_manually)
+        btns = QtWidgets.QHBoxLayout()
+        btns.setSpacing(8)
+        btns.addWidget(self.imp_btn, 1)
+        btns.addWidget(self.add_btn, 1)
         cl.addWidget(self.prof_lbl)
         cl.addWidget(self.warn_lbl)
-        cl.addWidget(self.imp_btn)
+        cl.addLayout(btns)
         root.addWidget(cfg)
 
-        self.form_box = QtWidgets.QGroupBox("Sign in")
-        fl = QtWidgets.QFormLayout(self.form_box)
+        self.form_box, fv = _card("Sign in")
+        fl = QtWidgets.QFormLayout()
+        fl.setHorizontalSpacing(14)
+        fl.setVerticalSpacing(10)
+        fl.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        fv.addLayout(fl)
         self.user = QtWidgets.QLineEdit()
         self.pw = QtWidgets.QLineEdit()
         self.pw.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -180,26 +321,33 @@ class MainWindow(QtWidgets.QWidget):
         self.routes = QtWidgets.QLineEdit()
         self.routes.setPlaceholderText("10.0.0.0/8, 192.168.50.0/24")
         self.route.currentIndexChanged.connect(lambda: self.routes.setEnabled(self.route.currentData() == "custom"))
-        self.remember = QtWidgets.QCheckBox("Remember password and key on this computer")
-        fl.addRow("Username", self.user)
-        fl.addRow("Password", self.pw)
-        fl.addRow("Pre-shared key", self.psk)
-        fl.addRow("Authentication", self.mode)
-        fl.addRow("Route", self.route)
-        fl.addRow("Networks", self.routes)
-        fl.addRow(self.remember)
+        self.peer = QtWidgets.QLineEdit()
+        self.peer.setPlaceholderText("Same as username")
+        self.peer.setToolTip("The ID your FortiGate expects (FortiClient's \u201cLocal ID\u201d). Leave empty to use the username.")
+        self.remember = QtWidgets.QCheckBox("Remember password and key")
+        for label, w in (("Username", self.user), ("Password", self.pw), ("Pre-shared key", self.psk),
+                         ("Authentication", self.mode), ("Peer ID", self.peer), ("Route", self.route), ("Networks", self.routes)):
+            fl.addRow(_field_label(label), w)
+        self.strict = QtWidgets.QCheckBox("Strict firewall mode (random local ports)")
+        self.strict.setToolTip("Use random local UDP ports instead of 500/4500. Try this when the gateway never "
+                               "replies from behind a strict firewall.")
+        fv.addSpacing(2)
+        fv.addWidget(self.strict)
+        fv.addWidget(self.remember)
+        for w in (self.strict, self.remember, self.mode, self.route):
+            w.setCursor(Qt.PointingHandCursor)
         root.addWidget(self.form_box)
 
-        self.err = QtWidgets.QLabel()
-        self.err.setWordWrap(True)
-        self.err.setStyleSheet("color: #d14343")
+        self.err = Banner("err")
         self.err.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self.err)
         root.addStretch(1)
         outer.addWidget(self.scroll, 1)
 
         self.go = QtWidgets.QPushButton("Connect")
-        self.go.setMinimumHeight(38)
+        self.go.setObjectName("primary")
+        self.go.setCursor(Qt.PointingHandCursor)
+        self.go.setMinimumHeight(46)
         self.go.setDefault(True)
         self.go.clicked.connect(self.toggle_connection)
         outer.addWidget(self.go)
@@ -208,13 +356,16 @@ class MainWindow(QtWidgets.QWidget):
         self.autostart = QtWidgets.QCheckBox("Start at login (in tray)")
         self.autostart.toggled.connect(self.set_autostart)
         self.menu_btn = QtWidgets.QPushButton("Add to app menu")
+        self.menu_btn.setObjectName("link")
+        self.menu_btn.setCursor(Qt.PointingHandCursor)
         self.menu_btn.clicked.connect(self.add_to_menu)
         opts.addWidget(self.autostart, 1)
         opts.addWidget(self.menu_btn)
         outer.addLayout(opts)
 
         self.log_btn = QtWidgets.QPushButton("Show technical log")
-        self.log_btn.setFlat(True)
+        self.log_btn.setObjectName("link")
+        self.log_btn.setCursor(Qt.PointingHandCursor)
         self.log_btn.setCheckable(True)
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -223,7 +374,7 @@ class MainWindow(QtWidgets.QWidget):
         self.log.hide()
         self.log_btn.toggled.connect(lambda on: (self.log.setVisible(on),
                                                  self.log_btn.setText("Hide technical log" if on else "Show technical log")))
-        outer.addWidget(self.log_btn)
+        outer.addWidget(self.log_btn, 0, Qt.AlignLeft)
         outer.addWidget(self.log)
         self.autostart.setEnabled(bool(appimage_path()))
         self.menu_btn.setEnabled(bool(appimage_path()))
@@ -324,6 +475,8 @@ class MainWindow(QtWidgets.QWidget):
         self.routes.setText(s.get("routes") or "")
         self.route.setCurrentIndex(1 if s.get("routes") else 0)
         self.routes.setEnabled(bool(s.get("routes")))
+        self.strict.setChecked(bool(s.get("random_ports")))
+        self.peer.setText(s.get("local_id") or "")
         self.remember.setChecked(bool(s.get("remember")))
         self._update_saved_placeholders()
 
@@ -335,16 +488,18 @@ class MainWindow(QtWidgets.QWidget):
     def _render_profile(self):
         p = self.profile
         if not p:
-            self.prof_lbl.setText("No configuration yet. Import your <b>FortiClient .conf export</b> "
-                                  "(or drop it on this window).")
+            self.prof_lbl.setText("No connection yet. Import your <b>FortiClient .conf export</b> "
+                                  "(or drop it on this window), or add the connection by hand.")
             self.warn_lbl.setText("")
             self.imp_btn.setText("Import FortiClient config…")
+            self.add_btn.setText("Add manually…")
         else:
             self.prof_lbl.setText(
-                f"<b>{p['name']}</b><br>Server: {p['server']}<br>IKEv2 · {p['ike_proposals'][0]} (+{len(p['ike_proposals']) - 1})"
+                f"<b>{html.escape(p['name'])}</b><br>Server: {html.escape(p['server'])}<br>IKEv2 · {p['ike_proposals'][0]} (+{len(p['ike_proposals']) - 1})"
                 f"<br>Lifetimes: IKE {p['ike_lifetime'] // 3600} h · ESP {p['esp_lifetime'] // 3600} h")
             self.warn_lbl.setText("\n".join(p.get("warnings") or []))
             self.imp_btn.setText("Import a different config…")
+            self.add_btn.setText("Edit connection…" if p.get("manual") else "Add manually…")
         self.form_box.setEnabled(bool(p))
         self.go.setEnabled(bool(p) and not self.busy and not self.problems)
 
@@ -354,6 +509,14 @@ class MainWindow(QtWidgets.QWidget):
             "FortiClient config (*.conf *.xml);;All files (*)")
         if path:
             self.import_config(path)
+
+    def add_manually(self):
+        dlg = ProfileDialog(self, self.profile if (self.profile or {}).get("manual") else None)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted and dlg.result_profile:
+            self.err.setText("")
+            self.profile = dlg.result_profile
+            core.save_profile(self.profile)
+            self._render_profile()
 
     def import_config(self, path):
         try:
@@ -423,12 +586,16 @@ class MainWindow(QtWidgets.QWidget):
     def _apply_state(self, state, st=None):
         st = st or getattr(self, "_st", {})
         self.state = state
-        self.dot.setPixmap(make_pixmap(state, 28))
+        self.dot.setPixmap(make_pixmap(state, 48))
+        self.hero.setProperty("state", state)
+        theme.repolish(self.hero)
+        self.hero.style().polish(self.status_lbl)
         self.status_lbl.setText(STATE_TEXT[state])
         if state == "on":
             self.sub_lbl.setText(f"VPN address {st.get('vip') or 'unknown'} · server {st.get('server', '')}")
         else:
             self.sub_lbl.setText(st.get("note") or "")
+        self.sub_lbl.setVisible(bool(self.sub_lbl.text()))
         self.tray.setIcon(self.icons[state])
         self.setWindowIcon(self.icons[state])
         self.tray.setToolTip(f"{APP_NAME} — {STATE_TEXT[state]}")
@@ -439,6 +606,8 @@ class MainWindow(QtWidgets.QWidget):
         on = self.state == "on"
         ready = bool(self.profile) and not self.problems and not self.busy
         self.go.setText("Disconnect" if on else "Connect")
+        self.go.setProperty("danger", on)
+        theme.repolish(self.go)
         self.go.setEnabled(ready or (on and not self.busy))
         self.form_box.setEnabled(bool(self.profile) and not on and not self.busy)
         self.act_conn.setText("Disconnect" if on else "Connect")
@@ -480,7 +649,10 @@ class MainWindow(QtWidgets.QWidget):
         except forti.ConfigError as e:
             self.err.setText(str(e))
             return
-        core.save_settings({"username": user, "auth_mode": mode, "remember": remember, "routes": routes})
+        strict = self.strict.isChecked()
+        local_id = self.peer.text().strip()
+        core.save_settings({"username": user, "auth_mode": mode, "remember": remember, "routes": routes,
+                            "random_ports": strict, "local_id": local_id})
         if remember:
             core.save_secrets(pw, psk)
         else:
@@ -489,7 +661,8 @@ class MainWindow(QtWidgets.QWidget):
         self.psk.clear()
         self._update_saved_placeholders()
         self.err.setText("")
-        self._run_job("connect", lambda: core.connect(prof, user, pw, psk, mode))
+        self._run_job("connect", lambda: core.connect(prof, user, pw, psk, mode, random_ports=strict,
+                                                         local_id=local_id))
 
     def disconnect(self):
         self.expect_drop = True
@@ -600,6 +773,7 @@ def main(argv):
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     bump_font(app, FONT_BUMP_PX)
+    theme.apply_theme(app)
     srv, already = _single_instance(f"ipsec-vpn-{os.getuid()}")
     if already and not smoke:
         return 0

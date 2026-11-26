@@ -20,6 +20,14 @@ CONF_DIR = "/etc/swanctl/conf.d"
 CONF_FILE = "ipsec-vpn.conf"
 STATE_DIR = "/run/ipsec-vpn"
 VICI_SOCKET = "/var/run/charon.vici"
+PORTS_CONF = "/etc/strongswan.d/ipsec-vpn-random-ports.conf"
+PORTS_TEXT = """# Written by IPSec VPN - Design By Rashid ("Strict firewall mode"); removed when the mode is switched off.
+# Use random local UDP ports instead of 500/4500, for firewalls that mishandle IKE with source port 500.
+charon {
+    port = 0
+    port_nat_t = 0
+}
+"""
 _VIP_RE = re.compile(r"\[(\d{1,3}(?:\.\d{1,3}){3})\]")
 
 
@@ -47,7 +55,8 @@ def explain(output):
     if ("timeout" in o or "timed out" in o or "giving up after" in o or "not established after" in o
             or "retransmit" in o):
         return ("No reply from the gateway. UDP 500/4500 may be blocked on this network "
-                "(the config's TCP 5500 fallback is not supported), or the server address is wrong.")
+                "(the config's TCP 5500 fallback is not supported), the server address may be wrong, or your firewall may "
+                "mishandle traffic from source port 500: try “Strict firewall mode (random local ports)”.")
     if "invalid_ke_payload" in o:
         return "Diffie-Hellman group mismatch with the gateway."
     return None
@@ -98,10 +107,39 @@ def _reload(swanctl):
         raise HelperError("Could not load the VPN config: " + out)
 
 
-def do_connect(req, swanctl="swanctl", conf_dir=CONF_DIR, state_dir=STATE_DIR, vici=VICI_SOCKET):
+def restart_daemon(vici=VICI_SOCKET):
+    for unit in ("strongswan", "strongswan-swanctl", "charon-systemd"):
+        if subprocess.run(["systemctl", "restart", unit], capture_output=True).returncode == 0:
+            break
+    time.sleep(1)
+
+
+def apply_random_ports(enabled, path=PORTS_CONF, restart=restart_daemon):
+    """Write/remove the strongSwan setting. Restarts the daemon only when something changed."""
+    try:
+        with open(path) as f:
+            current = f.read()
+    except FileNotFoundError:
+        current = None
+    if enabled and current != PORTS_TEXT:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(PORTS_TEXT)
+        os.chmod(path, 0o644)
+    elif not enabled and current is not None:
+        os.remove(path)
+    else:
+        return False
+    restart()
+    return True
+
+
+def do_connect(req, swanctl="swanctl", conf_dir=CONF_DIR, state_dir=STATE_DIR, vici=VICI_SOCKET,
+               ports_conf=PORTS_CONF, restart=restart_daemon):
     profile = req["profile"]
+    apply_random_ports(bool(req.get("random_ports")), ports_conf, restart)
     text = forti.render_swanctl(profile, req["username"], req["password"], req["psk"],
-                                req.get("auth_mode", "eap"))
+                                req.get("auth_mode", "eap"), req.get("local_id") or "")
     name = forti.conn_name(profile)
     ensure_daemon(swanctl, vici)
     _swanctl(["--terminate", "--ike", name], swanctl)  # clear any stale session
@@ -128,7 +166,7 @@ def do_connect(req, swanctl="swanctl", conf_dir=CONF_DIR, state_dir=STATE_DIR, v
     return {"ok": True, "state": state, "log": out}
 
 
-def do_disconnect(req, swanctl="swanctl", conf_dir=CONF_DIR, state_dir=STATE_DIR, vici=None, quiet=False):
+def do_disconnect(req, swanctl="swanctl", conf_dir=CONF_DIR, state_dir=STATE_DIR, vici=None, quiet=False, **_):
     name = forti.conn_name(req["profile"]) if req.get("profile") else None
     out = ""
     if name:

@@ -18,6 +18,10 @@ core.status = lambda **_: dict(STATE)
 app = QtWidgets.QApplication(["shots"])
 app.setStyle("Fusion")
 qt_app.bump_font(app, qt_app.FONT_BUMP_PX)
+from ipsec_vpn import theme
+MODE = os.environ.get("IPSEC_VPN_THEME", "light")
+theme.apply_theme(app, MODE)
+SUFFIX = "" if MODE == "light" else "-dark"
 
 def wait(ms=500):
     loop = QtCore.QEventLoop(); QtCore.QTimer.singleShot(ms, loop.quit); loop.exec_()
@@ -38,7 +42,7 @@ def shot(w, name):
     w.scroll.setFixedHeight(w.body.sizeHint().height() + 4)   # show the whole form, no scrolling
     w.adjustSize(); wait(300)
     w.resize(w.width(), w.sizeHint().height()); wait(300)
-    w.grab().save(os.path.join(OUT, name)); print("saved", name)
+    w.grab().save(os.path.join(OUT, name.replace(".png", SUFFIX + ".png"))); print("saved", name)
 
 # 1. first run: system setup banner
 w = window(["strongSwan is not installed", "the VPN helper is not installed"], profile=False)
@@ -67,10 +71,17 @@ from ipsec_vpn import helper
 w.err.setText(helper.explain("initiate failed: CHILD_SA not established after 30000ms"))
 shot(w, "05-error.png"); w.deleteLater()
 
+# 4b. add a connection by hand
+w = window([], profile=False)
+d = qt_app.ProfileDialog(w); d.name.setText("Office VPN"); d.server.setText("vpn.example.com"); d.nets.setText("10.0.0.0/8")
+d.show(); wait(500); d.resize(d.width(), d.sizeHint().height()); wait(300)
+d.grab().save(os.path.join(OUT, "07-add-connection" + SUFFIX + ".png")); print("saved 07-add-connection.png")
+d.close(); w.deleteLater()
+
 # 5. tray icon states
 S = 96; pad = 24; label_h = 40
-img = QtGui.QPixmap(3 * (S + pad) + pad, S + pad * 2 + label_h); img.fill(QtGui.QColor("#f4f5f7"))
-p = QtGui.QPainter(img); p.setPen(QtGui.QColor("#16191d")); f = p.font(); f.setPixelSize(16); p.setFont(f)
+img = QtGui.QPixmap(3 * (S + pad) + pad, S + pad * 2 + label_h); img.fill(QtGui.QColor("#f4f6f9" if MODE == "light" else "#13161b"))
+p = QtGui.QPainter(img); p.setPen(QtGui.QColor("#1a1f26" if MODE == "light" else "#e7eaee")); f = p.font(); f.setPixelSize(16); p.setFont(f)
 for i, (st, label) in enumerate((("off", "Disconnected"), ("busy", "Working"), ("on", "Connected"))):
     x = pad + i * (S + pad)
     p.drawPixmap(x, pad, qt_app.make_pixmap(st, S))

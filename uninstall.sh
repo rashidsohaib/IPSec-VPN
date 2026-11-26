@@ -8,6 +8,7 @@ done
 rm -f /etc/swanctl/conf.d/ipsec-vpn.conf /etc/sudoers.d/ipsec-vpn \
       /usr/local/bin/ipsec-vpn /usr/share/applications/ipsec-vpn.desktop
 rm -rf /usr/local/lib/ipsec-vpn /run/ipsec-vpn
+rm -f /etc/strongswan.d/ipsec-vpn-random-ports.conf   # strict-firewall-mode setting, if used
 # files from the pre-rename install (harmless if absent)
 rm -f /etc/swanctl/conf.d/diadem-vpn.conf /etc/sudoers.d/diadem-vpn /usr/local/bin/diadem-vpn \
       /usr/share/applications/diadem-vpn.desktop

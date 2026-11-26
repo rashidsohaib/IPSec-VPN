@@ -25,7 +25,9 @@ class Base(unittest.TestCase):
         self.conf = os.path.join(self.d, "conf.d"); self.state = os.path.join(self.d, "run")
         self.vici = os.path.join(self.d, "vici"); open(self.vici, "w").close()
         self.profile = forti.parse_forticlient(open(REAL).read())[0]
-        self.kw = dict(swanctl=self.sw, conf_dir=self.conf, state_dir=self.state, vici=self.vici)
+        self.ports = os.path.join(self.d, "strongswan.d", "ports.conf"); self.restarts = []
+        self.kw = dict(swanctl=self.sw, conf_dir=self.conf, state_dir=self.state, vici=self.vici,
+                       ports_conf=self.ports, restart=lambda: self.restarts.append(1))
     def req(self, **o):
         r = {"action": "connect", "profile": self.profile, "username": "rashid", "password": "p@ss\"w{o}rd\\",
              "psk": "sec ret'", "auth_mode": "eap"}; r.update(o); return r
@@ -108,6 +110,55 @@ class TestMigration(Base):
         finally:
             os.environ.pop("XDG_CONFIG_HOME", None)
 
+class TestStrictMode(Base):
+    def test_off_by_default_never_touches_daemon(self):
+        helper.handle(self.req(), **self.kw)
+        self.assertEqual(self.restarts, []); self.assertFalse(os.path.exists(self.ports))
+    def test_enable_is_idempotent_and_disable_removes(self):
+        helper.handle(self.req(random_ports=True), **self.kw)
+        txt = open(self.ports).read()
+        self.assertIn("port = 0", txt); self.assertIn("port_nat_t = 0", txt)
+        self.assertEqual(len(self.restarts), 1)
+        helper.handle(self.req(random_ports=True), **self.kw)       # unchanged -> no restart
+        self.assertEqual(len(self.restarts), 1)
+        helper.handle(self.req(), **self.kw)                        # switched off -> removed + restart
+        self.assertFalse(os.path.exists(self.ports)); self.assertEqual(len(self.restarts), 2)
+
+
+class TestManualProfile(Base):
+    def test_defaults_match_a_typical_fortigate(self):
+        p = forti.manual_profile("Office VPN", "vpn.example.com")
+        self.assertEqual(p["ike_proposals"], ["aes128-sha256-ecp521"]); self.assertEqual(p["esp_proposals"], p["ike_proposals"])
+        self.assertEqual(p["remote_ts"], ["0.0.0.0/0"]); self.assertTrue(p["use_eap"] and p["mode_config"])
+    def test_both_choices_and_networks(self):
+        p = forti.manual_profile("X", "203.0.113.10", "both", "both", "modp2048", "10.0.0.0/8, 192.168.1.5")
+        self.assertEqual(len(p["ike_proposals"]), 4); self.assertIn("aes256-sha1-modp2048", p["ike_proposals"])
+        self.assertEqual(p["remote_ts"], ["10.0.0.0/8", "192.168.1.5/32"])
+    def test_rejects_bad_input(self):
+        for args in (("", "h.example.com"), ("n", ""), ("n", "bad host; rm"), ("n", "h.example.com", "des"),
+                     ("n", "h.example.com", "aes128", "sha256", "ecp521", "not-a-net")):
+            with self.assertRaises(forti.ConfigError): forti.manual_profile(*args)
+    def test_connects_through_the_helper(self):
+        self.profile = forti.manual_profile("Office VPN", "vpn.example.com", networks="10.0.0.0/8")
+        r = helper.handle(self.req(), **self.kw)
+        self.assertTrue(r["ok"]); self.assertIn("--initiate --ike vpn-office-vpn", open(self.log).read())
+    def test_rendered_config_for_manual_profile(self):
+        t = forti.render_swanctl(forti.manual_profile("Office VPN", "vpn.example.com"), "jdoe", "pw", "key")
+        self.assertIn("proposals = aes128-sha256-ecp521", t); self.assertIn("remote_addrs = vpn.example.com", t)
+
+class TestIdentity(unittest.TestCase):
+    def prof(self):
+        return forti.parse_forticlient(open(os.path.join(os.path.dirname(__file__), "..", "examples", "sample-forticlient.conf")).read())[0]
+    def test_ike_id_is_username_by_default(self):
+        t = forti.render_swanctl(self.prof(), "jdoe", "pw", "key")
+        self.assertIn("id = jdoe", t); self.assertIn("eap_id = jdoe", t)
+    def test_explicit_peer_id_and_psk_eap(self):
+        t = forti.render_swanctl(self.prof(), "jdoe", "pw", "key", "psk+eap", "corp-users")
+        self.assertEqual(t.count("id = corp-users"), 2); self.assertIn("eap_id = jdoe", t)
+    def test_bad_peer_id_rejected(self):
+        with self.assertRaises(forti.ConfigError):
+            forti.render_swanctl(self.prof(), "jdoe", "pw", "key", "eap", "bad id; x")
+
 class TestHelper(Base):
     def test_connect_flow(self):
         r = helper.handle(self.req(), **self.kw)
@@ -117,6 +168,20 @@ class TestHelper(Base):
         # credentials are not left on disk after success
         self.assertFalse(os.path.exists(os.path.join(self.conf, helper.CONF_FILE)))
         self.assertTrue(json.load(open(os.path.join(self.state, "state.json")))["connected"])
+    def test_conf_file_holds_the_vpn_connection_when_loaded(self):
+        seen = {}
+        orig = helper._reload
+        def spy(swanctl):
+            seen["text"] = open(os.path.join(self.conf, helper.CONF_FILE)).read()
+            return orig(swanctl)
+        helper._reload = spy
+        try:
+            helper.handle(self.req(), **self.kw)
+        finally:
+            helper._reload = orig
+        t = seen["text"]
+        self.assertIn("connections {", t); self.assertIn("vpn-example-ipsec", t)
+        self.assertIn("id = rashid", t); self.assertNotIn("port_nat_t", t)
     def test_conf_written_0600(self):
         p = helper.write_conf("x", self.conf)
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)

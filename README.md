@@ -1,25 +1,34 @@
 # IPSec VPN - Design By Rashid
 
 A Linux desktop client for **FortiGate IPsec VPNs (IKEv2, pre-shared key + username/password)**. Import the
-`.conf` export from the Windows FortiClient, enter your credentials, and connect: no hand-written strongSwan
-configuration. It lives in the system tray, shows notifications, and ships as a single AppImage.
+`.conf` export from the Windows FortiClient (or add the connection by hand), enter your credentials, and connect:
+no hand-written strongSwan configuration. It lives in the system tray, shows notifications, and ships as a single AppImage.
 
 <p align="center">
   <img src="docs/screenshots/02-ready.png" width="300" alt="Main window, ready to connect">
   &nbsp;&nbsp;
   <img src="docs/screenshots/03-connected.png" width="300" alt="Main window while connected">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/02-ready-dark.png" width="300" alt="Dark theme">
 </p>
 
 ## Features
 
+- **Import or add by hand**: import a FortiClient `.conf` export, or press **Add manually…** and fill in the
+  gateway, networks and (optionally) encryption, integrity and Diffie-Hellman group.
 - **Uses your existing FortiClient config**: server, IKE/ESP proposals, Diffie-Hellman group, lifetimes,
   dead-peer detection and server-assigned address are read from the export and translated to strongSwan.
 - **System tray**: the icon is grey (disconnected), amber (working) or green (connected). Left-click shows or
   hides the window; right-click gives Connect / Disconnect / Quit. Closing or minimising keeps it running.
 - **Desktop notifications** on connect, disconnect, failure and when the tunnel drops unexpectedly.
 - **Split tunnel**: send everything through the VPN, or only the networks you list (for example `10.0.0.0/8`).
+- **Strict firewall mode**: uses random local UDP ports instead of 500/4500, for firewalls and NAT devices that
+  mishandle IKE traffic from source port 500 (see Troubleshooting).
+- **Peer ID** (FortiClient's "Local ID"): the identity the FortiGate matches your tunnel on. Empty means your
+  user name, which is what FortiGate dial-up tunnels expect.
 - **Plain-language errors**: "No reply from the gateway…" instead of a wall of IKE log. The technical log is
   one click away and collapsed by default.
+- **Flat, modern look**: light and dark themes that follow your system (force one with `IPSEC_VPN_THEME=light|dark`).
 - **Convenience**: remember credentials (optional), one-click connect from the tray, start at login,
   add to the application menu, single instance, larger readable UI, scrolls on small screens.
 - **Also a CLI** (`--cli connect | disconnect | status | show`) and a browser-based UI for headless use.
@@ -30,6 +39,8 @@ configuration. It lives in the system tray, shows notifications, and ships as a 
   <img src="docs/screenshots/05-error.png" width="230" alt="A readable error message">
   &nbsp;
   <img src="docs/screenshots/04-tray-menu.png" width="200" alt="Tray menu"><br>
+  <img src="docs/screenshots/07-add-connection.png" width="300" alt="Add a connection manually">
+  &nbsp;
   <img src="docs/screenshots/06-tray-icons.png" width="330" alt="Tray icon states">
 </p>
 
@@ -43,7 +54,8 @@ configuration. It lives in the system tray, shows notifications, and ships as a 
    ```
 2. **First run only**: press **Set up system components…**. After one administrator-password prompt it installs
    strongSwan and a small root-owned helper.
-3. Press **Import FortiClient config…** (or drop the `.conf` on the window).
+3. Press **Import FortiClient config…** (or drop the `.conf` on the window). No export file? Press **Add manually…**
+   and enter the gateway address; the defaults suit a typical FortiGate tunnel.
 4. Enter your username, password and the **pre-shared key**, then press **Connect**.
 
 > **Where do I get the config and the key?** Export the configuration from FortiClient on Windows
@@ -92,7 +104,7 @@ A sanitised example export is in [`examples/sample-forticlient.conf`](examples/s
 
 ## Limitations
 
-- IKEv2 with a pre-shared key and EAP login only. No IKEv1, certificate authentication or IPv6.
+- IKEv2 with a pre-shared key and EAP login only. Manual connections use the same, with one connection saved at a time. No IKEv1, certificate authentication or IPv6.
 - FortiClient's TCP fallback port (for networks that block UDP) is not supported: UDP 500 and 4500 must be
   reachable. On networks that block them you will see "No reply from the gateway".
 - Encrypted values (`EncX …`) in the export are not decrypted.
@@ -111,7 +123,9 @@ A sanitised example export is in [`examples/sample-forticlient.conf`](examples/s
 
 | Symptom | Likely cause / fix |
 |---|---|
-| "No reply from the gateway" | UDP 500/4500 blocked on this network (try another network or a phone hotspot), wrong server, or the gateway restricts source addresses. `sudo tcpdump -ni any 'host <server> and (udp port 500 or udp port 4500)'` shows whether anything comes back. |
+| "No reply from the gateway" | UDP 500/4500 blocked on this network (try another network or a phone hotspot), wrong server, or the gateway restricts source addresses. **If a Windows FortiClient connects from the same network, tick *Strict firewall mode*** (some firewalls drop IKE sent from source port 500). `python3 tools/ike_probe.py <server>` shows whether the gateway answers at all, and `sudo tcpdump -ni any 'host <server> and (udp port 500 or udp port 4500)'` shows what comes back. |
+| "No reply" only after the first exchange (the log shows `no IDi configured` / your own IP as the ID) | The gateway ignores clients whose IKE ID it cannot match. This app sends your user name as the ID; if your tunnel expects another **Peer ID**, enter it in the form. |
+| Manual connection: "No reply" or "no proposal" | The encryption, integrity or DH group differs from the tunnel's phase-1 settings. Ask the FortiGate administrator, or try *AES-128 and AES-256*, *SHA-256 and SHA-1* in **Edit connection…**. |
 | "The gateway rejected the login" | Wrong username, password or pre-shared key, or try the other **Authentication** mode. |
 | Connected but internet or local network stops | The config sends *all* traffic through the VPN. Set **Route** to *Only these networks* and list your company networks. |
 | Internal names do not resolve | Split tunnel keeps your normal DNS. Use IP addresses, or add the VPN's DNS to your resolver. |
@@ -133,7 +147,8 @@ packaging/build_appimage.sh
 # tests (no root and no real VPN needed: a fake swanctl is used)
 python3 -m unittest tests.test_all
 python3 tests/qt_e2e.py /tmp                    # needs PyQt5; offscreen UI test
-python3 tools/make_screenshots.py docs/screenshots
+python3 tools/make_screenshots.py docs/screenshots   # IPSEC_VPN_THEME=dark for the dark set
+python3 tools/ike_probe.py GATEWAY             # sends a harmless IKE_SA_INIT, reports whether anything answers
 ```
 
 Plain command-line install without the AppImage (CLI and browser UI only): `sudo ./install.sh`, remove with
@@ -147,8 +162,9 @@ ipsec_vpn/      application (forti.py parser/renderer, helper.py root helper, qt
 packaging/      AppImage build script, desktop entry
 examples/       sanitised sample FortiClient export
 tests/          unit tests and UI / tray end-to-end tests
-tools/          screenshot generator
+tools/          screenshot generator, ike_probe.py (is the gateway reachable from here?)
 docs/           screenshots
+CHANGELOG.md    release notes
 ```
 
 ## License
